@@ -1,0 +1,252 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────
+// Enums
+// ─────────────────────────────────────────────
+
+enum Role {
+  OPERATOR
+  OFFICER
+}
+
+enum ApplicationStatus {
+  APPLICATION_RECEIVED
+  UNDER_REVIEW
+  PENDING_PRE_SITE_RESUBMISSION
+  PRE_SITE_RESUBMITTED
+  SITE_VISIT_SCHEDULED
+  SITE_VISIT_DONE
+  AWAITING_POST_SITE_CLARIFICATION
+  PENDING_POST_SITE_RESUBMISSION
+  POST_SITE_CLARIFICATION_RESUBMITTED
+  PENDING_APPROVAL
+  APPROVED
+  REJECTED
+}
+
+enum DocumentVerificationStatus {
+  PENDING
+  VERIFIED
+  FAILED
+}
+
+enum NotificationType {
+  STATUS_CHANGED
+  FEEDBACK_ADDED
+  RESUBMISSION_RECEIVED
+  CHECKLIST_SUBMITTED
+}
+
+// ─────────────────────────────────────────────
+// Users
+// ─────────────────────────────────────────────
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  passwordHash String
+  name         String
+  role         Role
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  // Relations
+  applications  Application[]   @relation("OperatorApplications")
+  feedbacks     OfficerFeedback[]
+  notifications Notification[]
+
+  @@map("users")
+}
+
+// ─────────────────────────────────────────────
+// Applications
+// ─────────────────────────────────────────────
+
+model Application {
+  id         String            @id @default(uuid())
+  operatorId String
+  operator   User              @relation("OperatorApplications", fields: [operatorId], references: [id])
+  status     ApplicationStatus @default(APPLICATION_RECEIVED)
+  round      Int               @default(1)   // current submission round number
+  createdAt  DateTime          @default(now())
+  updatedAt  DateTime          @updatedAt
+
+  // Relations
+  sections         ApplicationSection[]
+  documents        Document[]
+  feedbacks        OfficerFeedback[]
+  submissionRounds SubmissionRound[]
+  notifications    Notification[]
+  checklistItems   ChecklistItem[]
+
+  @@map("applications")
+}
+
+// ─────────────────────────────────────────────
+// Application Sections (form data by section)
+// ─────────────────────────────────────────────
+
+model ApplicationSection {
+  id            String   @id @default(uuid())
+  applicationId String
+  application   Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  sectionKey    String   // e.g. "business_details", "owner_info", "premises_info"
+  data          Json     // structured form data for this section
+  isFlagged     Boolean  @default(false)   // flagged by officer for resubmission
+  isUpdated     Boolean  @default(false)   // updated in latest resubmission round
+  updatedAt     DateTime @updatedAt
+
+  @@unique([applicationId, sectionKey])
+  @@map("application_sections")
+}
+
+// ─────────────────────────────────────────────
+// Documents
+// ─────────────────────────────────────────────
+
+model Document {
+  id                 String                     @id @default(uuid())
+  applicationId      String
+  application        Application                @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  sectionKey         String                     // which section this document belongs to
+  fileName           String
+  fileUrl            String
+  mimeType           String
+  sizeBytes          Int
+  verificationStatus DocumentVerificationStatus @default(PENDING)
+  verificationNote   String?
+  isFlagged          Boolean                    @default(false)
+  uploadedAt         DateTime                   @default(now())
+
+  feedbacks OfficerFeedback[] @relation("DocumentFeedbacks")
+
+  @@map("documents")
+}
+
+// ─────────────────────────────────────────────
+// Officer Feedback
+// ─────────────────────────────────────────────
+
+model OfficerFeedback {
+  id            String   @id @default(uuid())
+  applicationId String
+  application   Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  officerId     String
+  officer       User     @relation(fields: [officerId], references: [id])
+  round         Int      // which submission round this feedback is for
+  sectionKey    String?  // null = general application-level feedback
+  documentId    String?
+  document      Document? @relation("DocumentFeedbacks", fields: [documentId], references: [id])
+  comment       String
+  templateId    String?
+  template      CommentTemplate? @relation(fields: [templateId], references: [id])
+  isResolved    Boolean  @default(false)
+  createdAt     DateTime @default(now())
+
+  @@map("officer_feedbacks")
+}
+
+// ─────────────────────────────────────────────
+// Predefined Comment Templates
+// ─────────────────────────────────────────────
+
+model CommentTemplate {
+  id         String   @id @default(uuid())
+  sectionKey String?  // null = applies to any section
+  text       String
+  createdAt  DateTime @default(now())
+
+  feedbacks OfficerFeedback[]
+
+  @@map("comment_templates")
+}
+
+// ─────────────────────────────────────────────
+// Submission Round Snapshots
+// ─────────────────────────────────────────────
+
+model SubmissionRound {
+  id            String      @id @default(uuid())
+  applicationId String
+  application   Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  round         Int
+  snapshot      Json        // full application data at time of submission
+  submittedAt   DateTime    @default(now())
+
+  @@unique([applicationId, round])
+  @@map("submission_rounds")
+}
+
+// ─────────────────────────────────────────────
+// Notifications
+// ─────────────────────────────────────────────
+
+model Notification {
+  id            String           @id @default(uuid())
+  userId        String
+  user          User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  applicationId String?
+  application   Application?     @relation(fields: [applicationId], references: [id], onDelete: SetNull)
+  type          NotificationType
+  message       String
+  isRead        Boolean          @default(false)
+  createdAt     DateTime         @default(now())
+
+  @@map("notifications")
+}
+
+// ─────────────────────────────────────────────
+// UC3 — Checklist Items (On-Site Assessment)
+// ─────────────────────────────────────────────
+
+model ChecklistItem {
+  id                   String      @id @default(uuid())
+  applicationId        String
+  application          Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  itemKey              String      // e.g. "fire_safety", "hygiene_standards"
+  itemLabel            String      // human-readable label
+  officerComment       String?
+  needsClarification   Boolean     @default(false)
+  isDraft              Boolean     @default(true)
+  createdAt            DateTime    @default(now())
+  updatedAt            DateTime    @updatedAt
+
+  responses ChecklistResponse[]
+
+  @@unique([applicationId, itemKey])
+  @@map("checklist_items")
+}
+
+model ChecklistResponse {
+  id              String        @id @default(uuid())
+  checklistItemId String
+  checklistItem   ChecklistItem @relation(fields: [checklistItemId], references: [id], onDelete: Cascade)
+  round           Int           @default(1)
+  operatorComment String
+  submittedAt     DateTime      @default(now())
+
+  documents ChecklistResponseDocument[]
+
+  @@map("checklist_responses")
+}
+
+model ChecklistResponseDocument {
+  id         String            @id @default(uuid())
+  responseId String
+  response   ChecklistResponse @relation(fields: [responseId], references: [id], onDelete: Cascade)
+  fileName   String
+  fileUrl    String
+  uploadedAt DateTime          @default(now())
+
+  @@map("checklist_response_documents")
+}
